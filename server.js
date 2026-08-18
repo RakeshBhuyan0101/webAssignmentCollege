@@ -320,9 +320,13 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
     const browser = await puppeteer.launch(launchOptions);
     const page = await browser.newPage();
 
-    // Load master HTML via local server URL so relative assets resolve perfectly
+    // Load master HTML via local server URL cleanly without networkidle0 hangs
     const masterUrl = `http://localhost:${currentPort}/session/${sessionId}/master.html`;
-    await page.goto(masterUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+    await page.goto(masterUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    // Short wait to ensure local styles & images finish layout rendering
+    await new Promise(resolve => setTimeout(resolve, 1200));
+
 
     // Generate A4 PDF with symmetric border & header/footer
     const pdfUint8Array = await page.pdf({
