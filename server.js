@@ -1,13 +1,18 @@
+const path = require('path');
+const fs = require('fs');
+
+// Ensure Puppeteer cache directory is inside project folder for cloud deployments (Render, Heroku, Railway)
+process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || path.join(__dirname, '.cache', 'puppeteer');
+
 const express = require('express');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
 const puppeteer = require('puppeteer');
-const path = require('path');
-const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 
 // Setup directories
 const UPLOADS_DIR = path.join(__dirname, 'tmp', 'uploads');
