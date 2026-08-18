@@ -289,11 +289,30 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
     const masterHtmlPath = path.join(sessionExtractDir, 'master.html');
     fs.writeFileSync(masterHtmlPath, masterHtml, 'utf8');
 
-    // Launch Puppeteer Chromium
-    const browser = await puppeteer.launch({
+    // Launch Puppeteer Chromium (supports local & cloud deployment environments)
+    const launchOptions = {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote'
+      ]
+    };
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    } else {
+      const commonPaths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome'];
+      for (const p of commonPaths) {
+        if (fs.existsSync(p)) {
+          launchOptions.executablePath = p;
+          break;
+        }
+      }
+    }
+    const browser = await puppeteer.launch(launchOptions);
     const page = await browser.newPage();
 
     // Load master HTML via local server URL so relative assets resolve perfectly
