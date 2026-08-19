@@ -63,9 +63,39 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInfo.classList.remove('hidden');
   }
 
+  const startPageInput = document.getElementById('startPage');
+
+  if (startPageInput) {
+    startPageInput.addEventListener('input', () => {
+      const val = startPageInput.value.trim();
+      const num = Number(val);
+      if (!val) {
+        startPageInput.setCustomValidity('Start Page Number is required.');
+      } else if (isNaN(num) || !Number.isInteger(num) || num < 1) {
+        startPageInput.setCustomValidity('Page number must be a positive integer (1 or greater). Negative numbers, zero, and decimals are not allowed.');
+      } else {
+        startPageInput.setCustomValidity('');
+        startPageInput.classList.remove('is-invalid');
+      }
+    });
+  }
+
   // Submit form to backend
   pdfForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+
+    const startPageVal = (document.getElementById('startPage')?.value || '').trim();
+    const startPageNum = Number(startPageVal);
+
+    if (!startPageVal || isNaN(startPageNum) || !Number.isInteger(startPageNum) || startPageNum < 1) {
+      alert('Validation Error: Start Page Number is mandatory and must be a positive integer (1 or greater, e.g. 11). Negative numbers, zero, or decimals are not allowed.');
+      if (startPageInput) {
+        startPageInput.classList.add('is-invalid');
+        startPageInput.focus();
+      }
+      return;
+    }
+
     if (!zipFileInput.files.length) {
       alert('Please select a ZIP file to upload.');
       return;

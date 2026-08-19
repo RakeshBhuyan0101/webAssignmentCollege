@@ -9,6 +9,7 @@ const multer = require('multer');
 const AdmZip = require('adm-zip');
 const puppeteer = require('puppeteer');
 const { v4: uuidv4 } = require('uuid');
+const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -93,6 +94,9 @@ function processHtmlContent(htmlContent, sessionUrlPrefix, baseDirRel) {
     headStyles = styleMatches.join('\n');
   }
 
+  // Force loading="eager" on all iframes and images to prevent lazy-load blank maps/images in PDF rendering
+  innerBody = innerBody.replace(/loading=["']lazy["']/gi, 'loading="eager"');
+
   // Rewrite relative src and href attributes (images, stylesheets, media)
   innerBody = innerBody.replace(/(src|href)=["'](?!http:\/\/|https:\/\/|data:|#|\/)([^"']+)["']/gi, (match, attr, relPath) => {
     // Avoid changing anchor links like #html
@@ -120,6 +124,13 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
 
     const titleLine1 = (req.body.titleLine1 || 'Assignment-1').trim();
     const titleLine2 = (req.body.titleLine2 || 'HTML').trim();
+
+    const startPageRaw = req.body.startPage;
+    const startPage = parseInt(startPageRaw, 10);
+
+    if (startPageRaw === undefined || startPageRaw === null || startPageRaw.trim() === '' || isNaN(startPage) || startPage < 1 || !Number.isInteger(Number(startPageRaw))) {
+      return res.status(400).json({ error: 'Start Page Number is mandatory and must be a valid positive integer (1 or greater).' });
+    }
 
     // Extract ZIP
     const zip = new AdmZip(req.file.path);
@@ -319,13 +330,24 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
     }
     const browser = await puppeteer.launch(launchOptions);
     const page = await browser.newPage();
+    await page.setViewport({ width: 1200, height: 1600 });
 
-    // Load master HTML via local server URL cleanly without networkidle0 hangs
+    // Load master HTML via local server URL with networkidle2 fallback for external resources (e.g. Google Maps)
     const masterUrl = `http://localhost:${currentPort}/session/${sessionId}/master.html`;
-    await page.goto(masterUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(masterUrl, { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 30000 }).catch(() => {});
 
-    // Short wait to ensure local styles & images finish layout rendering
-    await new Promise(resolve => setTimeout(resolve, 1200));
+    // Ensure all lazy attributes are removed and trigger full scroll to render all iframes & maps
+    await page.evaluate(() => {
+      document.querySelectorAll('iframe, img').forEach(el => {
+        el.setAttribute('loading', 'eager');
+        el.removeAttribute('loading');
+      });
+      window.scrollTo(0, document.body.scrollHeight);
+      window.scrollTo(0, 0);
+    }).catch(() => {});
+
+    // Allow time for local styles, images, and external iframes (like Google Maps) to complete rendering tiles
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
 
     // Generate A4 PDF with symmetric border & header/footer
@@ -348,7 +370,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
       footerTemplate: `
         <div style="font-family: Calibri, Arial, 'Segoe UI', sans-serif; font-size: 10pt; font-weight: bold; width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 0 16mm 10mm 16mm; box-sizing: border-box; color: #000000; text-transform: uppercase;">
           <div style="float: left;">${studentName}</div>
-          <div style="margin: 0 auto;"><span class="pageNumber"></span></div>
+          <div style="margin: 0 auto; visibility: hidden;"><span class="pageNumber"></span></div>
           <div style="float: right;">${sic}</div>
         </div>
       `
@@ -361,8 +383,31 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
     // Clean up uploaded zip file
     fs.unlink(req.file.path, () => {});
 
-    // Ensure raw Node.js Buffer is sent so Express doesn't JSON-stringify the Uint8Array
-    const pdfBuffer = Buffer.from(pdfUint8Array);
+    // Use pdf-lib to overlay starting page numbers from startPage onwards
+    const pdfDoc = await PDFDocument.load(pdfUint8Array);
+    const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+    const pages = pdfDoc.getPages();
+
+    pages.forEach((pdfPage, idx) => {
+      const pageNumStr = String(startPage + idx);
+      const fontSize = 10;
+      const textWidth = helveticaBold.widthOfTextAtSize(pageNumStr, fontSize);
+      const { width } = pdfPage.getSize();
+      
+      const x = (width - textWidth) / 2;
+      const y = 30; // Approx 10.5mm baseline from bottom
+
+      pdfPage.drawText(pageNumStr, {
+        x,
+        y,
+        size: fontSize,
+        font: helveticaBold,
+        color: rgb(0, 0, 0)
+      });
+    });
+
+    const modifiedPdfBytes = await pdfDoc.save();
+    const pdfBuffer = Buffer.from(modifiedPdfBytes);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Length', pdfBuffer.length);

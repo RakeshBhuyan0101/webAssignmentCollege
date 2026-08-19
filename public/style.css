@@ -160,6 +160,18 @@ body {
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
 }
 
+.input-group input:user-invalid,
+.input-group input.is-invalid {
+  border-color: #f87171;
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.2);
+}
+
+.input-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
 /* Upload Dropzone */
 .upload-zone {
   position: relative;
