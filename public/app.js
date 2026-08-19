@@ -119,19 +119,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       const blob = await response.blob();
-      // Ensure blob type is explicitly application/pdf
       const pdfBlob = new Blob([blob], { type: 'application/pdf' });
       const pdfUrl = URL.createObjectURL(pdfBlob);
 
-      const pdfObject = document.getElementById('pdfObject');
-      const pdfEmbed = document.getElementById('pdfEmbed');
-      const pdfFrame = document.getElementById('pdfFrame');
       const openTabBtn = document.getElementById('openTabBtn');
-
-      if (pdfObject) pdfObject.data = pdfUrl;
-      if (pdfEmbed) pdfEmbed.src = pdfUrl;
-      if (pdfFrame) pdfFrame.src = pdfUrl;
-
       openTabBtn.href = pdfUrl;
       downloadBtn.href = pdfUrl;
       const fileNameStr = `${(formData.get('sic') || 'assignment').replace(/[^a-z0-9_-]/gi, '_')}_output.pdf`;
@@ -141,6 +132,46 @@ document.addEventListener('DOMContentLoaded', () => {
       loadingState.classList.add('hidden');
       formSection.classList.add('hidden');
       previewSection.classList.remove('hidden');
+
+      // Render PDF pages cleanly using PDF.js inside viewerContainer
+      const viewerContainer = document.getElementById('viewerContainer');
+      viewerContainer.innerHTML = '<div class="viewer-loading"><div class="spinner"></div><p>Rendering PDF preview...</p></div>';
+
+      try {
+        const arrayBuffer = await pdfBlob.arrayBuffer();
+        if (window.pdfjsLib) {
+          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+          
+          const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+          const pdfDoc = await loadingTask.promise;
+
+          viewerContainer.innerHTML = '';
+
+          for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+            const page = await pdfDoc.getPage(pageNum);
+            const scale = 1.5;
+            const viewport = page.getViewport({ scale });
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'pdf-page-wrapper';
+
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            wrapper.appendChild(canvas);
+            viewerContainer.appendChild(wrapper);
+
+            await page.render({ canvasContext: context, viewport }).promise;
+          }
+        } else {
+          viewerContainer.innerHTML = `<iframe src="${pdfUrl}" style="width:100%; height:100%; border:none;"></iframe>`;
+        }
+      } catch (renderErr) {
+        console.error('PDF.js render error:', renderErr);
+        viewerContainer.innerHTML = `<iframe src="${pdfUrl}" style="width:100%; height:100%; border:none;"></iframe>`;
+      }
 
     } catch (err) {
       console.error(err);

@@ -410,19 +410,39 @@ body {
 
 .viewer-container {
   width: 100%;
-  height: 800px;
+  max-height: 80vh;
+  overflow-y: auto;
   border-radius: 12px;
-  overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.15);
   background: #0f172a;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
 }
 
-.viewer-container object,
-.viewer-container embed,
-.viewer-container iframe {
-  width: 100%;
-  height: 100%;
-  border: none;
+.viewer-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px;
+  color: var(--text-muted);
+}
+
+.pdf-page-wrapper {
+  background: #ffffff;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.pdf-page-wrapper canvas {
+  display: block;
+  max-width: 100%;
+  height: auto !important;
 }
 
 
