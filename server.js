@@ -328,6 +328,44 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             max-width: 100%;
             height: auto;
           }
+
+          /* Prevent page-break splitting inside output tables, forms, and containers */
+          .output-rendered table,
+          .output-rendered form,
+          .output-rendered fieldset,
+          .output-rendered tr,
+          .output-rendered td,
+          .output-rendered th,
+          .output-rendered .undertaking,
+          .output-rendered .form-group {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+
+          .output-rendered table {
+            width: 100% !important;
+            max-width: 100% !important;
+            border-collapse: collapse;
+          }
+
+          .output-rendered img,
+          .output-rendered iframe,
+          .output-rendered video,
+          .output-rendered canvas {
+            max-width: 100% !important;
+            max-height: 480px !important;
+            height: auto;
+          }
+
+          .output-rendered input[type="text"],
+          .output-rendered input[type="password"],
+          .output-rendered input[type="email"],
+          .output-rendered input[type="number"],
+          .output-rendered select,
+          .output-rendered textarea {
+            max-width: 100%;
+            box-sizing: border-box;
+          }
         </style>
       </head>
       <body>
@@ -358,7 +396,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
       const masterUrl = `http://localhost:${currentPort}/session/${sessionId}/master.html`;
       await page.goto(masterUrl, { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 30000 }).catch(() => {});
 
-      // Ensure all lazy attributes are removed and trigger full scroll to render all iframes & maps
+      // Ensure all lazy attributes are removed, scroll for maps, and auto-scale outputs to fit 1 page per question
       await page.evaluate(() => {
         document.querySelectorAll('iframe, img').forEach(el => {
           el.setAttribute('loading', 'eager');
@@ -366,6 +404,39 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
         });
         window.scrollTo(0, document.body.scrollHeight);
         window.scrollTo(0, 0);
+
+        // Dynamically scale question blocks if total height exceeds A4 printable height (~900px)
+        document.querySelectorAll('.question-block').forEach((qBlock, idx) => {
+          const maxAllowedHeight = idx === 0 ? 830 : 890;
+          const actualHeight = qBlock.scrollHeight;
+
+          if (actualHeight > maxAllowedHeight) {
+            const codeBlock = qBlock.querySelector('.code-container');
+            const outRendered = qBlock.querySelector('.output-rendered');
+
+            // If code block is long, compact code font size & line height slightly
+            if (codeBlock && codeBlock.scrollHeight > 200) {
+              codeBlock.style.fontSize = '9.5pt';
+              codeBlock.style.lineHeight = '1.3';
+            }
+
+            // Calculate scale ratio for output container so entire form/output fits on 1 single page
+            if (outRendered) {
+              const newBlockHeight = qBlock.scrollHeight;
+              if (newBlockHeight > maxAllowedHeight) {
+                const currentOutHeight = outRendered.scrollHeight;
+                const excess = newBlockHeight - maxAllowedHeight;
+                const targetHeight = Math.max(180, currentOutHeight - excess - 15);
+                const scaleRatio = Math.max(0.55, targetHeight / currentOutHeight);
+
+                outRendered.style.transform = `scale(${scaleRatio.toFixed(3)})`;
+                outRendered.style.transformOrigin = 'top left';
+                outRendered.style.width = `${(100 / scaleRatio).toFixed(1)}%`;
+                outRendered.style.marginBottom = `-${(currentOutHeight * (1 - scaleRatio)).toFixed(0)}px`;
+              }
+            }
+          }
+        });
       }).catch(() => {});
 
       // Allow time for local styles, images, and external iframes (like Google Maps) to complete rendering tiles
