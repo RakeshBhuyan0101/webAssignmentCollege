@@ -300,11 +300,14 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             color: #000000;
           }
 
-          /* Output section formatting - Starts on a fresh page like reference format */
+          /* Output section formatting - Thumb Rule:
+             1. If code ends at half page and output fits, renders on SAME page below code.
+             2. If output does not fit or code ends near bottom/last line, moves automatically to NEXT page.
+          */
           .output-container {
-            page-break-before: always;
-            break-before: page;
-            margin-top: 10px;
+            break-inside: avoid;
+            page-break-inside: avoid;
+            margin-top: 15px;
             margin-bottom: 20px;
           }
 
@@ -313,9 +316,11 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             font-size: 13pt;
             font-weight: bold;
             text-decoration: underline;
-            margin-top: 5px;
-            margin-bottom: 15px;
+            margin-top: 15px;
+            margin-bottom: 12px;
             color: #000000;
+            break-after: avoid;
+            page-break-after: avoid;
           }
 
           .output-rendered {
