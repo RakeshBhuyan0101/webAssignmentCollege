@@ -21,6 +21,46 @@ const EXTRACT_DIR = path.join(__dirname, 'tmp', 'extracted');
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 fs.mkdirSync(EXTRACT_DIR, { recursive: true });
 
+// Shared Puppeteer Browser instance for high performance and low RAM usage
+let globalBrowser = null;
+
+async function getSharedBrowser() {
+  if (globalBrowser && globalBrowser.isConnected()) {
+    return globalBrowser;
+  }
+  const launchOptions = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote'
+    ]
+  };
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  } else {
+    const commonPaths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome'];
+    for (const p of commonPaths) {
+      if (fs.existsSync(p)) {
+        launchOptions.executablePath = p;
+        break;
+      }
+    }
+  }
+  globalBrowser = await puppeteer.launch(launchOptions);
+  return globalBrowser;
+}
+
+// Background cleanup helper to prevent disk accumulation
+function scheduleSessionCleanup(sessionDir, delayMs = 10 * 60 * 1000) {
+  setTimeout(() => {
+    fs.rm(sessionDir, { recursive: true, force: true }, () => {});
+  }, delayMs);
+}
+
 // Static assets
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/session', express.static(EXTRACT_DIR));
@@ -305,83 +345,67 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
     const masterHtmlPath = path.join(sessionExtractDir, 'master.html');
     fs.writeFileSync(masterHtmlPath, masterHtml, 'utf8');
 
-    // Launch Puppeteer Chromium (supports local & cloud deployment environments)
-    const launchOptions = {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-first-run',
-        '--no-zygote'
-      ]
-    };
-    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    } else {
-      const commonPaths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome'];
-      for (const p of commonPaths) {
-        if (fs.existsSync(p)) {
-          launchOptions.executablePath = p;
-          break;
-        }
-      }
-    }
-    const browser = await puppeteer.launch(launchOptions);
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1200, height: 1600 });
+    // Reuse shared Browser instance for speed and low RAM footprint
+    const browser = await getSharedBrowser();
+    const context = await browser.createBrowserContext().catch(() => null);
+    const page = context ? await context.newPage() : await browser.newPage();
+    let pdfUint8Array;
 
-    // Load master HTML via local server URL with networkidle2 fallback for external resources (e.g. Google Maps)
-    const masterUrl = `http://localhost:${currentPort}/session/${sessionId}/master.html`;
-    await page.goto(masterUrl, { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 30000 }).catch(() => {});
+    try {
+      await page.setViewport({ width: 1200, height: 1600 });
 
-    // Ensure all lazy attributes are removed and trigger full scroll to render all iframes & maps
-    await page.evaluate(() => {
-      document.querySelectorAll('iframe, img').forEach(el => {
-        el.setAttribute('loading', 'eager');
-        el.removeAttribute('loading');
+      // Load master HTML via local server URL with networkidle2 fallback for external resources (e.g. Google Maps)
+      const masterUrl = `http://localhost:${currentPort}/session/${sessionId}/master.html`;
+      await page.goto(masterUrl, { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 30000 }).catch(() => {});
+
+      // Ensure all lazy attributes are removed and trigger full scroll to render all iframes & maps
+      await page.evaluate(() => {
+        document.querySelectorAll('iframe, img').forEach(el => {
+          el.setAttribute('loading', 'eager');
+          el.removeAttribute('loading');
+        });
+        window.scrollTo(0, document.body.scrollHeight);
+        window.scrollTo(0, 0);
+      }).catch(() => {});
+
+      // Allow time for local styles, images, and external iframes (like Google Maps) to complete rendering tiles
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Generate A4 PDF with symmetric border & header/footer
+      pdfUint8Array = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        displayHeaderFooter: true,
+        margin: {
+          top: '16mm',
+          bottom: '18mm',
+          left: '16mm',
+          right: '16mm'
+        },
+        headerTemplate: `
+          <div style="width: 100%; height: 100%; position: relative;">
+            <!-- Black Rectangular Outer Border Box - Bottom line shifted slightly upwards -->
+            <div style="position: absolute; top: 6mm; left: 6mm; width: 198mm; height: 279mm; border: 1.5px solid #000000; box-sizing: border-box; pointer-events: none;"></div>
+          </div>
+        `,
+        footerTemplate: `
+          <div style="font-family: Calibri, Arial, 'Segoe UI', sans-serif; font-size: 10pt; font-weight: bold; width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 0 16mm 10mm 16mm; box-sizing: border-box; color: #000000; text-transform: uppercase;">
+            <div style="float: left;">${studentName}</div>
+            <div style="margin: 0 auto; visibility: hidden;"><span class="pageNumber"></span></div>
+            <div style="float: right;">${sic}</div>
+          </div>
+        `
       });
-      window.scrollTo(0, document.body.scrollHeight);
-      window.scrollTo(0, 0);
-    }).catch(() => {});
+    } finally {
+      await page.close().catch(() => {});
+      if (context) await context.close().catch(() => {});
+    }
 
-    // Allow time for local styles, images, and external iframes (like Google Maps) to complete rendering tiles
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-
-    // Generate A4 PDF with symmetric border & header/footer
-    const pdfUint8Array = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      displayHeaderFooter: true,
-      margin: {
-        top: '16mm',
-        bottom: '18mm',
-        left: '16mm',
-        right: '16mm'
-      },
-      headerTemplate: `
-        <div style="width: 100%; height: 100%; position: relative;">
-          <!-- Black Rectangular Outer Border Box - Bottom line shifted slightly upwards -->
-          <div style="position: absolute; top: 6mm; left: 6mm; width: 198mm; height: 279mm; border: 1.5px solid #000000; box-sizing: border-box; pointer-events: none;"></div>
-        </div>
-      `,
-      footerTemplate: `
-        <div style="font-family: Calibri, Arial, 'Segoe UI', sans-serif; font-size: 10pt; font-weight: bold; width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 0 16mm 10mm 16mm; box-sizing: border-box; color: #000000; text-transform: uppercase;">
-          <div style="float: left;">${studentName}</div>
-          <div style="margin: 0 auto; visibility: hidden;"><span class="pageNumber"></span></div>
-          <div style="float: right;">${sic}</div>
-        </div>
-      `
-
-    });
-
-
-    await browser.close();
-
-    // Clean up uploaded zip file
+    // Clean up uploaded zip file immediately
     fs.unlink(req.file.path, () => {});
+
+    // Schedule background cleanup of extracted session files after 10 minutes
+    scheduleSessionCleanup(sessionExtractDir);
 
     // Use pdf-lib to overlay starting page numbers from startPage onwards
     const pdfDoc = await PDFDocument.load(pdfUint8Array);
