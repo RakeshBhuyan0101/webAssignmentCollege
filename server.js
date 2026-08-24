@@ -10,6 +10,7 @@ const AdmZip = require('adm-zip');
 const puppeteer = require('puppeteer');
 const { v4: uuidv4 } = require('uuid');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const { Document, Packer, Paragraph, TextRun, ImageRun, Header, Footer, PageNumber, AlignmentType, BorderStyle } = require('docx');
 
 
 const app = express();
@@ -108,6 +109,63 @@ function extractQuestionNumber(filePath) {
     return parseInt(match[1], 10);
   }
   return 999;
+}
+
+// Helper to find matching CSS file for an HTML file (e.g. q1.css for q1.html)
+function findMatchingCssFile(htmlFilePath, sessionExtractDir) {
+  const dir = path.dirname(htmlFilePath);
+  const baseName = path.basename(htmlFilePath, path.extname(htmlFilePath));
+
+  // 1. Check exact basename match (q1.css for q1.html)
+  const candidate1 = path.join(dir, `${baseName}.css`);
+  if (fs.existsSync(candidate1)) return candidate1;
+
+  // 2. Check question number match (q1.css or question1.css)
+  const qNum = extractQuestionNumber(htmlFilePath);
+  if (qNum !== 999) {
+    const candidate2 = path.join(dir, `q${qNum}.css`);
+    if (fs.existsSync(candidate2)) return candidate2;
+    const candidate3 = path.join(dir, `question${qNum}.css`);
+    if (fs.existsSync(candidate3)) return candidate3;
+  }
+
+  // 3. Check stylesheet linked in HTML content
+  try {
+    const htmlContent = fs.readFileSync(htmlFilePath, 'utf8');
+    const linkMatches = [...htmlContent.matchAll(/<link[^>]+href=["']([^"']+\.css)["']/gi)];
+    for (const match of linkMatches) {
+      const cssRelPath = match[1];
+      const candidateCss = path.resolve(dir, cssRelPath);
+      if (fs.existsSync(candidateCss) && candidateCss.startsWith(sessionExtractDir)) {
+        return candidateCss;
+      }
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+// Scope external/question CSS rules strictly to .output-rendered so they don't leak into master document header/background
+function scopeCssToOutput(cssString, scopeSelector = '.output-rendered') {
+  if (!cssString) return '';
+  return cssString.replace(/([^{}]+)\{([^}]*)\}/g, (match, selectors, rules) => {
+    if (selectors.trim().startsWith('@')) return match;
+    let cleanRules = rules;
+    if (selectors.includes('body') || selectors.includes('html')) {
+      cleanRules = cleanRules.replace(/background(-color)?\s*:[^;]+;?/gi, '');
+    }
+    const scopedSelectors = selectors.split(',').map(sel => {
+      const s = sel.trim();
+      if (s === 'body' || s === 'html') {
+        return scopeSelector;
+      }
+      if (s.startsWith(scopeSelector)) {
+        return s;
+      }
+      return `${scopeSelector} ${s}`;
+    }).join(', ');
+    return `${scopedSelectors} {${cleanRules}}`;
+  });
 }
 
 // Helper to escape HTML characters for source code display
@@ -386,9 +444,31 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
       const cleanedCode = cleanHtmlSourceCode(rawCode);
       const escapedCode = escapeHtml(cleanedCode);
 
+      // Check for matching CSS file (e.g. q1.css)
+      const matchingCssPath = findMatchingCssFile(filePath, sessionExtractDir);
+      let cssBlockHtml = '';
+      let externalCssStyles = '';
+
+      if (matchingCssPath) {
+        const rawCssCode = fs.readFileSync(matchingCssPath, 'utf8');
+        const cleanedCssCode = cleanHtmlSourceCode(rawCssCode);
+        const escapedCssCode = escapeHtml(cleanedCssCode);
+        const cssFileName = path.basename(matchingCssPath);
+
+        cssBlockHtml = `
+          <div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-top: 10px; margin-bottom: 4px;">${cssFileName}</div>
+          <div class="code-container">${escapedCssCode}</div>
+        `;
+        const scopedCss = scopeCssToOutput(rawCssCode);
+        externalCssStyles = `<style>\n${scopedCss}\n</style>`;
+      }
+
       // Still process HTML for headStyles (page-level CSS) and fallback innerBody
       const relDir = path.dirname(path.relative(sessionExtractDir, filePath));
-      const { headStyles, innerBody } = processHtmlContent(rawCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
+      let { headStyles, innerBody } = processHtmlContent(rawCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
+      if (externalCssStyles) {
+        headStyles += `\n${externalCssStyles}`;
+      }
 
       const isFirstQuestion = index === 0;
       const outputImgSrc = outputScreenshots[index];
@@ -401,7 +481,9 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             <strong>${qNum}. <u>Solution:</u></strong>
           </div>
 
+          ${matchingCssPath ? `<div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-bottom: 4px;">${path.basename(filePath)}</div>` : ''}
           <div class="code-container">${escapedCode}</div>
+          ${cssBlockHtml}
 
           <div class="output-container">
             <div class="output-heading">
@@ -441,25 +523,36 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             background: #ffffff;
           }
 
-          /* Document Title Header on Page 1 Top */
+          /* Document Title Header on Page 1 Top - Clean white background, NO blue border lines */
           .document-header {
             text-align: center;
             margin-top: 5px;
             margin-bottom: 25px;
+            background: #ffffff !important;
+            border: none !important;
           }
           .document-header h1 {
             font-family: Calibri, Arial, "Segoe UI", sans-serif;
             font-size: 16pt;
             font-weight: bold;
             margin: 0 0 4px 0;
-            color: #000000;
+            color: #000000 !important;
+            border: none !important;
+            border-bottom: none !important;
+            box-shadow: none !important;
+            background: #ffffff !important;
+            padding-bottom: 0 !important;
           }
           .document-header h2 {
             font-family: Calibri, Arial, "Segoe UI", sans-serif;
             font-size: 16pt;
             font-weight: bold;
             margin: 0;
-            color: #000000;
+            color: #000000 !important;
+            border: none !important;
+            border-bottom: none !important;
+            box-shadow: none !important;
+            background: #ffffff !important;
           }
 
           /* Question blocks */
@@ -492,6 +585,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             text-align: left;
             margin-bottom: 20px;
             color: #000000;
+            background: #ffffff !important;
           }
 
           /* Marquee styling for fallback rendering */
@@ -763,6 +857,320 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
   } catch (err) {
     console.error('Error generating PDF:', err);
     res.status(500).json({ error: 'Server error generating PDF: ' + err.message });
+  }
+});
+
+// Main DOCX generation route
+app.post('/generate-docx', upload.single('zipFile'), async (req, res) => {
+  const sessionId = uuidv4();
+  const sessionExtractDir = path.join(EXTRACT_DIR, sessionId);
+  fs.mkdirSync(sessionExtractDir, { recursive: true });
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No ZIP file uploaded' });
+    }
+
+    const studentName = (req.body.studentName || 'RAKESH BHUYAN').trim();
+    const sic = (req.body.sic || '25MMCE44').trim();
+
+    const titleLine1 = (req.body.titleLine1 || 'Assignment-1').trim();
+    const titleLine2 = (req.body.titleLine2 || 'HTML').trim();
+
+    const startPageRaw = req.body.startPage;
+    const startPage = parseInt(startPageRaw, 10) || 1;
+
+    // Extract ZIP
+    const zip = new AdmZip(req.file.path);
+    zip.extractAllTo(sessionExtractDir, true);
+
+    // Find and sort all HTML files
+    let htmlFilePaths = findHtmlFiles(sessionExtractDir);
+    if (htmlFilePaths.length === 0) {
+      return res.status(400).json({ error: 'No HTML files (e.g. q1.html, q2.html) found in the uploaded ZIP.' });
+    }
+
+    htmlFilePaths.sort((a, b) => {
+      const numA = extractQuestionNumber(a);
+      const numB = extractQuestionNumber(b);
+      if (numA !== numB) return numA - numB;
+      return a.localeCompare(b);
+    });
+
+    const sessionUrlPrefix = `/session/${sessionId}`;
+    let questionsHtml = '';
+    const rawCodes = [];
+    const questionNums = [];
+
+    htmlFilePaths.forEach((filePath, index) => {
+      const qNum = extractQuestionNumber(filePath) !== 999 ? extractQuestionNumber(filePath) : (index + 1);
+      const rawCode = fs.readFileSync(filePath, 'utf8');
+      const relDir = path.dirname(path.relative(sessionExtractDir, filePath));
+
+      const matchingCssPath = findMatchingCssFile(filePath, sessionExtractDir);
+      let externalCssStyles = '';
+      if (matchingCssPath) {
+        const rawCssCode = fs.readFileSync(matchingCssPath, 'utf8');
+        externalCssStyles = `<style>\n${rawCssCode}\n</style>`;
+      }
+
+      let { headStyles, innerBody } = processHtmlContent(rawCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
+      if (externalCssStyles) {
+        headStyles += `\n${externalCssStyles}`;
+      }
+
+      rawCodes.push(rawCode);
+      questionNums.push(qNum);
+
+      questionsHtml += `
+        <div class="question-block">
+          ${headStyles}
+          <div class="solution-heading"><strong>${qNum}. <u>Solution:</u></strong></div>
+          <div class="code-container">${escapeHtml(rawCode)}</div>
+          <div class="output-container">
+            <div class="output-heading"><strong>Output</strong></div>
+            <div class="output-rendered" id="docx-target-${index}">
+              ${innerBody}
+            </div>
+          </div>
+        </div>
+      `;
+    });
+
+    const masterHtml = `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>Assignment Document</title>
+        <style>
+          @page { size: A4; margin: 18mm 18mm 22mm 18mm; }
+          * { box-sizing: border-box; }
+          body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #000; margin: 0; padding: 0; background: #fff; }
+          .document-header { text-align: center; margin-top: 5px; margin-bottom: 25px; }
+          .document-header h1 { font-size: 16pt; font-weight: bold; margin: 0 0 4px 0; }
+          .document-header h2 { font-size: 16pt; font-weight: bold; margin: 0; }
+          .question-block { margin-bottom: 25px; }
+          .output-rendered { font-family: Arial, sans-serif; margin-top: 10px; width: 100%; max-width: 100%; box-sizing: border-box; }
+          table { width: 100% !important; border-collapse: collapse; }
+          img, iframe { max-width: 100%; }
+        </style>
+      </head>
+      <body>
+        <div class="document-header">
+          <h1>${titleLine1}</h1>
+          <h2>${titleLine2}</h2>
+        </div>
+        ${questionsHtml}
+      </body>
+      </html>
+    `;
+
+    const masterHtmlPath = path.join(sessionExtractDir, 'master.html');
+    fs.writeFileSync(masterHtmlPath, masterHtml, 'utf8');
+
+    // Use shared Browser to capture high-res PNG screenshots of outputs
+    const browser = await getSharedBrowser();
+    const context = await browser.createBrowserContext().catch(() => null);
+    const page = context ? await context.newPage() : await browser.newPage();
+    const outputImages = [];
+
+    try {
+      await page.setViewport({ width: 1100, height: 1600, deviceScaleFactor: 2 });
+      const masterUrl = `http://localhost:${currentPort}/session/${sessionId}/master.html`;
+      await page.goto(masterUrl, { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 30000 }).catch(() => {});
+
+      await page.evaluate(() => {
+        document.querySelectorAll('iframe, img').forEach(el => {
+          el.setAttribute('loading', 'eager');
+          el.removeAttribute('loading');
+        });
+        window.scrollTo(0, document.body.scrollHeight);
+        window.scrollTo(0, 0);
+      }).catch(() => {});
+
+      await new Promise(r => setTimeout(r, 2000));
+
+      for (let i = 0; i < htmlFilePaths.length; i++) {
+        const el = await page.$(`#docx-target-${i}`);
+        if (el) {
+          const box = await el.boundingBox();
+          const width = box ? Math.min(540, Math.round(box.width / 2)) : 500;
+          const height = box ? Math.round((box.height / (box.width || 1)) * width) : 320;
+          const imgBuffer = await el.screenshot({ type: 'png' });
+          outputImages.push({ imgBuffer, width, height });
+        } else {
+          outputImages.push(null);
+        }
+      }
+    } finally {
+      await page.close().catch(() => {});
+      if (context) await context.close().catch(() => {});
+    }
+
+    fs.unlink(req.file.path, () => {});
+    scheduleSessionCleanup(sessionExtractDir);
+
+    // Build Word DOCX document using docx package
+    const docChildren = [
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [
+          new TextRun({ text: titleLine1, font: "Calibri", bold: true, size: 32 })
+        ]
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [
+          new TextRun({ text: titleLine2, font: "Calibri", bold: true, size: 32 })
+        ]
+      }),
+      new Paragraph({ text: "" })
+    ];
+
+    htmlFilePaths.forEach((filePath, index) => {
+      const qNum = questionNums[index];
+      const rawCode = rawCodes[index];
+      const imgInfo = outputImages[index];
+
+      // Solution heading
+      docChildren.push(
+        new Paragraph({
+          children: [
+            new TextRun({ text: `${qNum}. `, font: "Calibri", bold: true, size: 26 }),
+            new TextRun({ text: "Solution:", font: "Calibri", bold: true, underline: {}, size: 26 })
+          ]
+        })
+      );
+
+      // Check for matching CSS file (e.g. q1.css)
+      const matchingCssPath = findMatchingCssFile(filePath, sessionExtractDir);
+
+      if (matchingCssPath) {
+        docChildren.push(
+          new Paragraph({
+            children: [
+              new TextRun({ text: path.basename(filePath), font: "Calibri", bold: true, size: 22 })
+            ]
+          })
+        );
+      }
+
+      // HTML Code snippet
+      const codeLines = rawCode.split('\n');
+      const codeRuns = [];
+      codeLines.forEach((line, lIdx) => {
+        codeRuns.push(new TextRun({ text: line, font: "Calibri", size: 22 }));
+        if (lIdx < codeLines.length - 1) {
+          codeRuns.push(new TextRun({ break: 1, font: "Calibri", size: 22 }));
+        }
+      });
+
+      docChildren.push(new Paragraph({ children: codeRuns }));
+
+      // If CSS file exists, print CSS code snippet right below HTML code
+      if (matchingCssPath) {
+        const rawCssCode = fs.readFileSync(matchingCssPath, 'utf8');
+        const cssFileName = path.basename(matchingCssPath);
+
+        docChildren.push(new Paragraph({ text: "" }));
+        docChildren.push(
+          new Paragraph({
+            children: [
+              new TextRun({ text: cssFileName, font: "Calibri", bold: true, size: 22 })
+            ]
+          })
+        );
+
+        const cssLines = rawCssCode.split('\n');
+        const cssRuns = [];
+        cssLines.forEach((line, lIdx) => {
+          cssRuns.push(new TextRun({ text: line, font: "Calibri", size: 22 }));
+          if (lIdx < cssLines.length - 1) {
+            cssRuns.push(new TextRun({ break: 1, font: "Calibri", size: 22 }));
+          }
+        });
+
+        docChildren.push(new Paragraph({ children: cssRuns }));
+      }
+
+      docChildren.push(new Paragraph({ text: "" }));
+
+      // Output heading
+      docChildren.push(
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Output", font: "Calibri", bold: true, underline: {}, size: 26 })
+          ]
+        })
+      );
+
+      docChildren.push(new Paragraph({ text: "" }));
+
+      // High-res photo of HTML output
+      if (imgInfo) {
+        docChildren.push(
+          new Paragraph({
+            children: [
+              new ImageRun({
+                data: imgInfo.imgBuffer,
+                transformation: { width: imgInfo.width, height: imgInfo.height }
+              })
+            ]
+          })
+        );
+      }
+
+      docChildren.push(new Paragraph({ text: "" }));
+    });
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {
+            page: {
+              margin: { top: 720, bottom: 720, left: 720, right: 720 },
+              pageBorders: {
+                pageBorderTop: { style: BorderStyle.SINGLE, size: 8, color: '000000', space: 20 },
+                pageBorderBottom: { style: BorderStyle.SINGLE, size: 8, color: '000000', space: 20 },
+                pageBorderLeft: { style: BorderStyle.SINGLE, size: 8, color: '000000', space: 20 },
+                pageBorderRight: { style: BorderStyle.SINGLE, size: 8, color: '000000', space: 20 },
+              }
+            }
+          },
+          footers: {
+            default: new Footer({
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.LEFT,
+                  tabStops: [
+                    { type: "center", position: 4500 },
+                    { type: "right", position: 9000 }
+                  ],
+                  children: [
+                    new TextRun({ text: studentName.toUpperCase(), font: "Calibri", bold: true, size: 20, color: "555555" }),
+                    new TextRun({ text: `\t${startPage}\t`, font: "Calibri", bold: true, size: 20, color: "555555" }),
+                    new TextRun({ text: sic.toUpperCase(), font: "Calibri", bold: true, size: 20, color: "555555" })
+                  ]
+                })
+              ]
+            })
+          },
+          children: docChildren
+        }
+      ]
+    });
+
+    const docxBuffer = await Packer.toBuffer(doc);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Length', docxBuffer.length);
+    res.setHeader('Content-Disposition', `attachment; filename="${sic}_assignment.docx"`);
+    res.end(docxBuffer);
+
+  } catch (err) {
+    console.error('Error generating DOCX:', err);
+    res.status(500).json({ error: 'Server error generating DOCX: ' + err.message });
   }
 });
 
