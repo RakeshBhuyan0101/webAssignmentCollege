@@ -456,32 +456,42 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
         const cssFileName = path.basename(matchingCssPath);
 
         cssBlockHtml = `
-          <div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-top: 10px; margin-bottom: 4px;">${cssFileName}</div>
+          <div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-top: 10px; margin-bottom: 4px; color: #000000 !important; background: transparent !important;">${cssFileName}</div>
           <div class="code-container">${escapedCssCode}</div>
         `;
         const scopedCss = scopeCssToOutput(rawCssCode);
         externalCssStyles = `<style>\n${scopedCss}\n</style>`;
       }
 
-      // Still process HTML for headStyles (page-level CSS) and fallback innerBody
+      // Still process HTML for fallback innerBody
       const relDir = path.dirname(path.relative(sessionExtractDir, filePath));
       let { headStyles, innerBody } = processHtmlContent(rawCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
-      if (externalCssStyles) {
-        headStyles += `\n${externalCssStyles}`;
-      }
 
       const isFirstQuestion = index === 0;
       const outputImgSrc = outputScreenshots[index];
 
+      // Only include scoped CSS if screenshot failed and falling back to innerBody
+      let fallbackStyles = '';
+      if (!outputImgSrc) {
+        if (headStyles) {
+          const rawHeadCss = headStyles.replace(/<\/?style[^>]*>/gi, '');
+          const scopedHead = scopeCssToOutput(rawHeadCss);
+          if (scopedHead) fallbackStyles += `<style>\n${scopedHead}\n</style>`;
+        }
+        if (externalCssStyles) {
+          fallbackStyles += `\n${externalCssStyles}`;
+        }
+      }
+
       questionsHtml += `
         <div class="question-block ${isFirstQuestion ? 'first-question' : ''}">
-          ${headStyles}
+          ${fallbackStyles}
 
           <div class="solution-heading">
             <strong>${qNum}. <u>Solution:</u></strong>
           </div>
 
-          ${matchingCssPath ? `<div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-bottom: 4px;">${path.basename(filePath)}</div>` : ''}
+          ${matchingCssPath ? `<div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-bottom: 4px; color: #000000 !important; background: transparent !important;">${path.basename(filePath)}</div>` : ''}
           <div class="code-container">${escapedCode}</div>
           ${cssBlockHtml}
 
@@ -559,6 +569,9 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
           .question-block {
             page-break-before: always;
             break-before: page;
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            color: #000000 !important;
           }
           .question-block.first-question {
             page-break-before: avoid;
@@ -571,7 +584,8 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             font-weight: bold;
             margin-top: 15px;
             margin-bottom: 12px;
-            color: #000000;
+            color: #000000 !important;
+            background: transparent !important;
           }
 
           .code-container {
@@ -584,8 +598,9 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             -moz-tab-size: 2;
             text-align: left;
             margin-bottom: 20px;
-            color: #000000;
+            color: #000000 !important;
             background: #ffffff !important;
+            background-color: #ffffff !important;
           }
 
           /* Marquee styling for fallback rendering */
@@ -636,25 +651,20 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
 
           /* ── Output Screenshot Image ─────────────────────────────────────
              The entire rendered HTML output is embedded as a single JPEG.
-             - width: 100%  → fills text-area width
-             - height: auto → preserves aspect ratio (no distortion)
-             - max-height: 230mm → caps at ~1 A4 page; prevents one huge
-               output from pushing everything off-screen
-             - display:block + margin:auto centres it
-             This means:
-             • If code ends with a few lines left on the page, the output
-               image starts there and continues on the same page.
-             • break-inside:avoid on .output-container keeps the heading
-               and the image together as one atomic block.
+             - max-width: 100% → fills text-area width cleanly
+             - height: auto    → preserves aspect ratio (no distortion)
+             - max-height: 230mm → caps at ~1 A4 page; prevents overflow
+             - display:block
           */
           .output-screenshot {
             display: block;
-            width: 100%;
+            max-width: 100%;
             height: auto;
             max-height: 230mm;
             object-fit: contain;
             object-position: top left;
             margin-top: 6px;
+            background: #ffffff !important;
           }
 
           /* Fallback: inline HTML output (used only when screenshot fails) */
