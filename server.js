@@ -111,6 +111,49 @@ function extractQuestionNumber(filePath) {
   return 999;
 }
 
+// Helper to identify library / framework / minified CSS files that shouldn't be printed as assignment solution source code
+function isIgnoredCssFile(cssPath) {
+  if (!cssPath) return true;
+  const fileName = path.basename(cssPath).toLowerCase();
+
+  // Ignore minified files (.min.css or contains .min.)
+  if (fileName.endsWith('.min.css') || fileName.includes('.min.')) {
+    return true;
+  }
+
+  // Ignore common CSS libraries/frameworks
+  const ignoredKeywords = [
+    'bootstrap',
+    'tailwind',
+    'font-awesome',
+    'fontawesome',
+    'materialize',
+    'bulma',
+    'foundation',
+    'animate',
+    'normalize',
+    'reset',
+    'pure',
+    'skeleton',
+    'semantic',
+    'uikit'
+  ];
+
+  const baseWithoutExt = fileName.replace(/\.css$/i, '');
+  if (ignoredKeywords.some(keyword => baseWithoutExt.includes(keyword))) {
+    return true;
+  }
+
+  // Ignore files in vendor / node_modules / lib / libraries folders
+  const normalizedSegments = cssPath.replace(/\\/g, '/').toLowerCase().split('/');
+  const ignoredDirs = ['node_modules', 'vendor', 'vendors', 'lib', 'libs', 'libraries', 'assets'];
+  if (normalizedSegments.slice(0, -1).some(segment => ignoredDirs.includes(segment))) {
+    return true;
+  }
+
+  return false;
+}
+
 // Helper to find matching CSS file for an HTML file (e.g. q1.css for q1.html)
 function findMatchingCssFile(htmlFilePath, sessionExtractDir) {
   const dir = path.dirname(htmlFilePath);
@@ -118,18 +161,18 @@ function findMatchingCssFile(htmlFilePath, sessionExtractDir) {
 
   // 1. Check exact basename match (q1.css for q1.html)
   const candidate1 = path.join(dir, `${baseName}.css`);
-  if (fs.existsSync(candidate1)) return candidate1;
+  if (fs.existsSync(candidate1) && !isIgnoredCssFile(candidate1)) return candidate1;
 
   // 2. Check question number match (q1.css or question1.css)
   const qNum = extractQuestionNumber(htmlFilePath);
   if (qNum !== 999) {
     const candidate2 = path.join(dir, `q${qNum}.css`);
-    if (fs.existsSync(candidate2)) return candidate2;
+    if (fs.existsSync(candidate2) && !isIgnoredCssFile(candidate2)) return candidate2;
     const candidate3 = path.join(dir, `question${qNum}.css`);
-    if (fs.existsSync(candidate3)) return candidate3;
+    if (fs.existsSync(candidate3) && !isIgnoredCssFile(candidate3)) return candidate3;
   }
 
-  // 3. Check stylesheet linked in HTML content
+  // 3. Check stylesheet linked in HTML content (excluding vendor/framework/minified CSS)
   try {
     const htmlContent = fs.readFileSync(htmlFilePath, 'utf8');
     const linkMatches = [...htmlContent.matchAll(/<link[^>]+href=["']([^"']+\.css)["']/gi)];
@@ -137,7 +180,9 @@ function findMatchingCssFile(htmlFilePath, sessionExtractDir) {
       const cssRelPath = match[1];
       const candidateCss = path.resolve(dir, cssRelPath);
       if (fs.existsSync(candidateCss) && candidateCss.startsWith(sessionExtractDir)) {
-        return candidateCss;
+        if (!isIgnoredCssFile(candidateCss)) {
+          return candidateCss;
+        }
       }
     }
   } catch (e) {}
