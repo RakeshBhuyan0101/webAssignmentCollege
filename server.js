@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { execFileSync } = require('child_process');
 
 // Ensure Puppeteer cache directory is inside project folder for cloud deployments (Render, Heroku, Railway)
 process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || path.join(__dirname, '.cache', 'puppeteer');
@@ -85,7 +86,7 @@ const upload = multer({
   }
 });
 
-// Helper function to recursively collect html files
+// Helper function to recursively collect renderable assignment files
 function findHtmlFiles(dirPath) {
   let results = [];
   const list = fs.readdirSync(dirPath);
@@ -94,11 +95,35 @@ function findHtmlFiles(dirPath) {
     const stat = fs.statSync(filePath);
     if (stat && stat.isDirectory()) {
       results = results.concat(findHtmlFiles(filePath));
-    } else if (file.endsWith('.html') || file.endsWith('.htm')) {
+    } else if (/\.(html?|php)$/i.test(file)) {
       results.push(filePath);
     }
   });
   return results;
+}
+
+// PHP cannot be executed by the Node/Puppeteer renderer. Keep its HTML markup
+// available for the output preview while omitting server-side PHP blocks.
+function getStaticPreviewContent(filePath, rawContent) {
+  if (!/\.php$/i.test(filePath)) return rawContent;
+  return rawContent
+    .replace(/<\?php[\s\S]*?\?>/gi, '')
+    .replace(/<\?=\s*[\s\S]*?\?>/gi, '')
+    .replace(/<\?(?!php|=)[\s\S]*?\?>/gi, '');
+}
+
+function renderPhpFile(filePath, rawContent) {
+  try {
+    return execFileSync('php', [filePath], {
+      cwd: path.dirname(filePath),
+      encoding: 'utf8',
+      timeout: 10000,
+      maxBuffer: 10 * 1024 * 1024
+    });
+  } catch (error) {
+    console.warn('PHP output failed for', path.basename(filePath), ':', error.message);
+    return getStaticPreviewContent(filePath, rawContent);
+  }
 }
 
 // Extract question number from filename like q1.html, q2.html, 1.html, etc.
@@ -282,6 +307,11 @@ function cleanHtmlSourceCode(rawCode) {
   return code.trim();
 }
 
+function preserveSourceCode(rawCode) {
+  if (!rawCode) return '';
+  return rawCode.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
 // Clean and adapt inner HTML for output section
 function processHtmlContent(htmlContent, sessionUrlPrefix, baseDirRel) {
   let processed = htmlContent;
@@ -356,10 +386,10 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
     const zip = new AdmZip(req.file.path);
     zip.extractAllTo(sessionExtractDir, true);
 
-    // Find and sort all HTML files
+    // Find and sort all HTML/PHP files
     let htmlFilePaths = findHtmlFiles(sessionExtractDir);
     if (htmlFilePaths.length === 0) {
-      return res.status(400).json({ error: 'No HTML files (e.g. q1.html, q2.html) found in the uploaded ZIP.' });
+      return res.status(400).json({ error: 'No HTML or PHP files (e.g. q1.html, q2.html, 1.php) found in the uploaded ZIP.' });
     }
 
     htmlFilePaths.sort((a, b) => {
@@ -391,10 +421,16 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
         const fileUrl = `http://localhost:${currentPort}/session/${sessionId}/${relFilePath}`;
 
         try {
-          await ssPage.goto(fileUrl, {
-            waitUntil: ['domcontentloaded', 'networkidle2'],
-            timeout: 15000
-          }).catch(() => {});
+          const rawFileContent = fs.readFileSync(filePath, 'utf8');
+          if (/\.php$/i.test(filePath)) {
+            const previewContent = renderPhpFile(filePath, rawFileContent);
+            await ssPage.setContent(previewContent, { waitUntil: ['domcontentloaded', 'networkidle0'] });
+          } else {
+            await ssPage.goto(fileUrl, {
+              waitUntil: ['domcontentloaded', 'networkidle2'],
+              timeout: 15000
+            }).catch(() => {});
+          }
 
           // Eager-load all media and freeze marquee tags statically for complete visibility
           await ssPage.evaluate(() => {
@@ -440,8 +476,14 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
               if (rect.bottom > maxBottom) maxBottom = rect.bottom;
             });
 
-            const docHeight = Math.max(document.documentElement.scrollHeight, body.scrollHeight);
-            const finalHeight = maxBottom > 0 ? Math.max(maxBottom + 25, 60) : Math.max(docHeight, 100);
+            // Measure the actual text/content range instead of the viewport-sized body.
+            const bodyRect = body.getBoundingClientRect();
+            const contentRange = document.createRange();
+            contentRange.selectNodeContents(body);
+            const rangeRect = contentRange.getBoundingClientRect();
+            const contentBottom = Math.max(maxBottom, rangeRect.bottom);
+            const contentTop = Math.min(bodyRect.top, rangeRect.top);
+            const finalHeight = Math.max(contentBottom - contentTop + 25, 60);
 
             return {
               width: 900,
@@ -486,7 +528,9 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
     htmlFilePaths.forEach((filePath, index) => {
       const qNum = extractQuestionNumber(filePath) !== 999 ? extractQuestionNumber(filePath) : (index + 1);
       const rawCode = fs.readFileSync(filePath, 'utf8');
-      const cleanedCode = cleanHtmlSourceCode(rawCode);
+      const cleanedCode = /\.php$/i.test(filePath)
+        ? preserveSourceCode(rawCode)
+        : cleanHtmlSourceCode(rawCode);
       const escapedCode = escapeHtml(cleanedCode);
 
       // Check for matching CSS file (e.g. q1.css)
@@ -508,9 +552,12 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
         externalCssStyles = `<style>\n${scopedCss}\n</style>`;
       }
 
-      // Still process HTML for fallback innerBody
+      // Still process the source for fallback innerBody
       const relDir = path.dirname(path.relative(sessionExtractDir, filePath));
-      let { headStyles, innerBody } = processHtmlContent(rawCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
+      const previewCode = /\.php$/i.test(filePath)
+        ? renderPhpFile(filePath, rawCode)
+        : rawCode;
+      let { headStyles, innerBody } = processHtmlContent(previewCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
 
       const isFirstQuestion = index === 0;
       const outputImgSrc = outputScreenshots[index];
@@ -536,7 +583,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             <strong>${qNum}. <u>Solution:</u></strong>
           </div>
 
-          ${matchingCssPath ? `<div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-bottom: 4px; color: #000000 !important; background: transparent !important;">${path.basename(filePath)}</div>` : ''}
+          <div style="font-weight: bold; font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin-bottom: 4px; color: #000000 !important; background: transparent !important;">${path.basename(filePath)}</div>
           <div class="code-container">${escapedCode}</div>
           ${cssBlockHtml}
 
@@ -563,7 +610,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
         <style>
           @page {
             size: A4;
-            margin: 18mm 20mm 22mm 20mm;
+            margin: 12mm 15mm 14mm 15mm;
           }
           * {
             box-sizing: border-box;
@@ -571,7 +618,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
           body {
             font-family: Calibri, Arial, "Segoe UI", sans-serif;
             font-size: 11pt;
-            line-height: 1.45;
+            line-height: 1.3;
             color: #000000;
             margin: 0;
             padding: 0;
@@ -582,7 +629,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
           .document-header {
             text-align: center;
             margin-top: 5px;
-            margin-bottom: 25px;
+            margin-bottom: 8px;
             background: #ffffff !important;
             border: none !important;
           }
@@ -612,23 +659,26 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
 
           /* Question blocks */
           .question-block {
-            page-break-before: always;
-            break-before: page;
+            page-break-before: auto;
+            break-before: auto;
+            margin: 0;
             background: #ffffff !important;
             background-color: #ffffff !important;
             color: #000000 !important;
           }
           .question-block.first-question {
-            page-break-before: avoid;
-            break-before: auto;
+            margin-top: 0;
+          }
+          .question-block + .question-block {
+            margin-top: 12px;
           }
 
           .solution-heading {
             font-family: Calibri, Arial, "Segoe UI", sans-serif;
             font-size: 13pt;
             font-weight: bold;
-            margin-top: 15px;
-            margin-bottom: 12px;
+            margin-top: 0;
+            margin-bottom: 0;
             color: #000000 !important;
             background: transparent !important;
           }
@@ -636,13 +686,13 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
           .code-container {
             font-family: Calibri, Arial, "Segoe UI", sans-serif;
             font-size: 11pt;
-            line-height: 1.45;
+            line-height: 1.3;
             white-space: pre-wrap;
             word-break: break-word;
             tab-size: 2;
             -moz-tab-size: 2;
             text-align: left;
-            margin-bottom: 20px;
+            margin-bottom: 0;
             color: #000000 !important;
             background: #ffffff !important;
             background-color: #ffffff !important;
@@ -662,10 +712,10 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
              2. If output does not fit or code ends near bottom/last line, moves automatically to NEXT page.
           */
           .output-container {
-            break-inside: avoid;
-            page-break-inside: avoid;
-            margin-top: 15px;
-            margin-bottom: 20px;
+            break-inside: auto;
+            page-break-inside: auto;
+            margin-top: 0;
+            margin-bottom: 0;
           }
 
           .output-heading {
@@ -673,8 +723,8 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
             font-size: 13pt;
             font-weight: bold;
             text-decoration: underline;
-            margin-top: 15px;
-            margin-bottom: 12px;
+            margin-top: 0;
+            margin-bottom: 4px;
             color: #000000;
             break-after: avoid;
             page-break-after: avoid;
@@ -682,7 +732,7 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
 
           .output-rendered {
             font-family: Arial, sans-serif;
-            margin-top: 10px;
+            margin-top: 0;
             width: 100%;
             max-width: 100%;
             box-sizing: border-box;
@@ -698,24 +748,24 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
              The entire rendered HTML output is embedded as a single JPEG.
              - max-width: 100% → fills text-area width cleanly
              - height: auto    → preserves aspect ratio (no distortion)
-             - max-height: 230mm → caps at ~1 A4 page; prevents overflow
+             - max-height: 180mm → keeps long outputs from consuming a full page
              - display:block
           */
           .output-screenshot {
             display: block;
             max-width: 100%;
             height: auto;
-            max-height: 230mm;
+            max-height: 180mm;
             object-fit: contain;
             object-position: top left;
-            margin-top: 6px;
+            margin-top: 0;
             background: #ffffff !important;
           }
 
           /* Fallback: inline HTML output (used only when screenshot fails) */
           .output-rendered {
             font-family: Arial, sans-serif;
-            margin-top: 10px;
+            margin-top: 0;
             width: 100%;
             max-width: 100%;
             box-sizing: border-box;
@@ -829,10 +879,10 @@ app.post('/generate-pdf', upload.single('zipFile'), async (req, res) => {
         printBackground: true,
         displayHeaderFooter: true,
         margin: {
-          top: '16mm',
-          bottom: '18mm',
-          left: '18mm',
-          right: '18mm'
+          top: '12mm',
+          bottom: '14mm',
+          left: '15mm',
+          right: '15mm'
         },
         headerTemplate: `
           <div style="width: 100%; height: 100%; position: relative;">
@@ -939,10 +989,10 @@ app.post('/generate-docx', upload.single('zipFile'), async (req, res) => {
     const zip = new AdmZip(req.file.path);
     zip.extractAllTo(sessionExtractDir, true);
 
-    // Find and sort all HTML files
+    // Find and sort all HTML/PHP files
     let htmlFilePaths = findHtmlFiles(sessionExtractDir);
     if (htmlFilePaths.length === 0) {
-      return res.status(400).json({ error: 'No HTML files (e.g. q1.html, q2.html) found in the uploaded ZIP.' });
+      return res.status(400).json({ error: 'No HTML or PHP files (e.g. q1.html, q2.html, 1.php) found in the uploaded ZIP.' });
     }
 
     htmlFilePaths.sort((a, b) => {
@@ -969,7 +1019,10 @@ app.post('/generate-docx', upload.single('zipFile'), async (req, res) => {
         externalCssStyles = `<style>\n${rawCssCode}\n</style>`;
       }
 
-      let { headStyles, innerBody } = processHtmlContent(rawCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
+      const previewCode = /\.php$/i.test(filePath)
+        ? renderPhpFile(filePath, rawCode)
+        : rawCode;
+      let { headStyles, innerBody } = processHtmlContent(previewCode, sessionUrlPrefix, relDir === '.' ? '' : relDir);
       if (externalCssStyles) {
         headStyles += `\n${externalCssStyles}`;
       }
@@ -999,14 +1052,15 @@ app.post('/generate-docx', upload.single('zipFile'), async (req, res) => {
         <meta charset="UTF-8">
         <title>Assignment Document</title>
         <style>
-          @page { size: A4; margin: 18mm 18mm 22mm 18mm; }
+          @page { size: A4; margin: 12mm 15mm 14mm 15mm; }
           * { box-sizing: border-box; }
-          body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #000; margin: 0; padding: 0; background: #fff; }
-          .document-header { text-align: center; margin-top: 5px; margin-bottom: 25px; }
+          body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 1.3; color: #000; margin: 0; padding: 0; background: #fff; }
+          .document-header { text-align: center; margin-top: 5px; margin-bottom: 8px; }
           .document-header h1 { font-size: 16pt; font-weight: bold; margin: 0 0 4px 0; }
           .document-header h2 { font-size: 16pt; font-weight: bold; margin: 0; }
-          .question-block { margin-bottom: 25px; }
-          .output-rendered { font-family: Arial, sans-serif; margin-top: 10px; width: 100%; max-width: 100%; box-sizing: border-box; }
+          .question-block { margin: 0; }
+          .question-block + .question-block { margin-top: 12px; }
+          .output-rendered { font-family: Arial, sans-serif; margin-top: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
           table { width: 100% !important; border-collapse: collapse; }
           img, iframe { max-width: 100%; }
         </style>
@@ -1101,15 +1155,13 @@ app.post('/generate-docx', upload.single('zipFile'), async (req, res) => {
       // Check for matching CSS file (e.g. q1.css)
       const matchingCssPath = findMatchingCssFile(filePath, sessionExtractDir);
 
-      if (matchingCssPath) {
-        docChildren.push(
-          new Paragraph({
-            children: [
-              new TextRun({ text: path.basename(filePath), font: "Calibri", bold: true, size: 22 })
-            ]
-          })
-        );
-      }
+      docChildren.push(
+        new Paragraph({
+          children: [
+            new TextRun({ text: path.basename(filePath), font: "Calibri", bold: true, size: 22 })
+          ]
+        })
+      );
 
       // HTML Code snippet
       const codeLines = rawCode.split('\n');
